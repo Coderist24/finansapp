@@ -5,20 +5,22 @@ import streamlit as st
 # ============================================
 TEST_MODE = False  # False yaparak normal login'i aktifleştirin
 # ============================================
-# Silence informational Streamlit messages in production: replace with no-ops
+# Uyarı/success/info bastırma ayarı (varsayılan: kapalı). Hatalar (st.error) ASLA bastırılmaz.
+SUPPRESS_NON_ERROR_ALERTS = False
 try:
     _original_st_info = st.info
     _original_st_warning = st.warning
     _original_st_success = st.success
     _original_st_error = st.error
 
-    # Replace with no-op functions to avoid UI spam while keeping other st features
-    st.info = lambda *args, **kwargs: None
-    st.warning = lambda *args, **kwargs: None
-    st.success = lambda *args, **kwargs: None
-    st.error = lambda *args, **kwargs: None
+    # İsteğe bağlı olarak info/warning/success mesajlarını bastır (UI kalabalığını azaltmak için)
+    if SUPPRESS_NON_ERROR_ALERTS:
+        st.info = lambda *args, **kwargs: None
+        st.warning = lambda *args, **kwargs: None
+        st.success = lambda *args, **kwargs: None
+    # st.error kesinlikle bastırılmaz; kırmızı hata kutuları görünür kalır
 except Exception:
-    # If Streamlit isn't available or overriding fails, continue without crashing
+    # Streamlit yoksa veya override başarısızsa, hataya düşmeden devam et
     pass
 
 import yfinance as yf
@@ -2538,10 +2540,13 @@ class TefasDataManager:
             return f"error: {str(e)}"
     
     def bulk_save_to_parquet(self) -> bool:
-        """Memory cache'deki tüm veriyi toplu olarak Azure Blob Storage'a Parquet formatında kaydet"""
+        """Memory cache'deki tüm veriyi toplu olarak Azure Blob Storage'a Parquet formatında kaydet - OPTİMİZE EDİLDİ"""
         try:
             if not self.memory_cache:
+                st.info("ℹ️ Kaydedilecek yeni veri yok (cache boş)")
                 return True
+            
+            st.info(f"💾 {len(self.memory_cache)} kayıt Azure'a yazılıyor...")
             
             # Memory cache'i DataFrame'e çevir
             new_df = pd.DataFrame(list(self.memory_cache.values()))
@@ -2553,20 +2558,29 @@ class TefasDataManager:
             new_df['Tedavüldeki Pay Sayısı'] = new_df['Tedavüldeki Pay Sayısı'].astype('float64')
             new_df['Kişi Sayısı'] = new_df['Kişi Sayısı'].astype('int64')
             
-            # Mevcut veriyi Azure'dan oku (varsa)
-            existing_content = self.blob_storage.download_file(self.data_file)
-            if existing_content:
-                parquet_buffer = io.BytesIO(existing_content)
-                existing_df = pd.read_parquet(parquet_buffer)
-                
-                # Duplicate'leri çıkar (tarih + fon_kodu kombinasyonu)
-                existing_df = existing_df[~existing_df.set_index(['Tarih', 'Fon Kodu']).index.isin(
-                    new_df.set_index(['Tarih', 'Fon Kodu']).index
-                )]
-                
-                # Birleştir
-                final_df = pd.concat([existing_df, new_df], ignore_index=True)
-            else:
+            # Mevcut veriyi Azure'dan oku (varsa) - TIMEOUT EKLENDİ
+            try:
+                existing_content = self.blob_storage.download_file(self.data_file, silent=True)
+                if existing_content and len(existing_content) > 100:  # En az 100 byte olmalı
+                    parquet_buffer = io.BytesIO(existing_content)
+                    existing_df = pd.read_parquet(parquet_buffer)
+                    
+                    # Eğer mevcut veri varsa duplicate'leri çıkar
+                    if not existing_df.empty:
+                        # Duplicate'leri çıkar (tarih + fon_kodu kombinasyonu)
+                        existing_df = existing_df[~existing_df.set_index(['Tarih', 'Fon Kodu']).index.isin(
+                            new_df.set_index(['Tarih', 'Fon Kodu']).index
+                        )]
+                        
+                        # Birleştir
+                        final_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    else:
+                        final_df = new_df
+                else:
+                    # Dosya boş veya yoksa sadece yeni veri
+                    final_df = new_df
+            except Exception as read_error:
+                st.warning(f"⚠️ Mevcut veri okunamadı, sadece yeni veri yazılacak: {str(read_error)}")
                 final_df = new_df
             
             # Tarihe göre sırala
@@ -2590,7 +2604,7 @@ class TefasDataManager:
             if success:
                 # Cache'i kaydet ve temizle
                 self._save_cache()
-                st.success(f"✅ {len(new_df)} TEFAS satırı Azure Blob Storage'a kaydedildi")
+                st.success(f"✅ {len(new_df)} TEFAS satırı Azure Blob Storage'a kaydedildi (Toplam: {len(final_df)} satır)")
                 return True
             else:
                 st.error("❌ TEFAS verileri Azure'a kaydedilemedi")
@@ -2598,6 +2612,8 @@ class TefasDataManager:
             
         except Exception as e:
             st.error(f"❌ TEFAS bulk kayıt hatası: {str(e)}")
+            import traceback
+            st.error(f"Detay: {traceback.format_exc()}")
             return False
     
     def get_fund_price(self, fund_code: str, target_date: datetime) -> Optional[Dict]:
@@ -4919,6 +4935,11 @@ def show_login_page():
         color: #e2e8f0 !important;
         border-left: 4px solid !important;
     }
+    .stAlert p,
+    .stAlert span,
+    .stAlert div {
+        color: #e2e8f0 !important;
+    }
     
     div[data-baseweb="notification"] {
         background: rgba(15, 23, 42, 0.95) !important;
@@ -4944,23 +4965,41 @@ def show_login_page():
         background: rgba(16, 185, 129, 0.15) !important;
         border-left-color: #10b981 !important;
     }
+    .stSuccess p, .stSuccess span, .stSuccess div, .stSuccess strong, .stSuccess em, .stSuccess code {
+        color: #ffffff !important;
+    }
     
     /* Error message specific styling */
     .stError {
-        background: rgba(239, 68, 68, 0.15) !important;
+        background: rgba(239, 68, 68, 0.25) !important;
         border-left-color: #ef4444 !important;
+        border: 2px solid rgba(239, 68, 68, 0.5) !important;
+    }
+    .stError p, .stError span, .stError div, .stError strong, .stError em, .stError code {
+        color: #ffffff !important;
+        font-weight: 600 !important;
     }
     
     /* Info message specific styling */
     .stInfo {
-        background: rgba(59, 130, 246, 0.15) !important;
+        background: rgba(59, 130, 246, 0.25) !important;
         border-left-color: #3b82f6 !important;
+        border: 2px solid rgba(59, 130, 246, 0.5) !important;
+    }
+    .stInfo p, .stInfo span, .stInfo div, .stInfo strong, .stInfo em, .stInfo code {
+        color: #ffffff !important;
+        font-weight: 500 !important;
     }
     
     /* Warning message specific styling */
     .stWarning {
-        background: rgba(245, 158, 11, 0.15) !important;
+        background: rgba(245, 158, 11, 0.25) !important;
         border-left-color: #f59e0b !important;
+        border: 2px solid rgba(245, 158, 11, 0.5) !important;
+    }
+    .stWarning p, .stWarning span, .stWarning div, .stWarning strong, .stWarning em, .stWarning code {
+        color: #ffffff !important;
+        font-weight: 500 !important;
     }
     
     /* Radio button text styling - Tab metinlerini beyaz yap */
@@ -5000,7 +5039,7 @@ def show_login_page():
     
     # Radio butonu - widget kendi state'ini yönetsin
     selected_tab_index = st.radio(
-        "", 
+        "Sekme seçimi", 
         options=range(len(tab_names)),
         format_func=lambda x: tab_names[x],
         horizontal=True, 
@@ -5035,6 +5074,16 @@ def show_login_page():
                     if authenticate_user(email, password):
                         st.session_state['logged_in'] = True
                         st.session_state['user_email'] = email
+                        # Kullanıcı değiştiğinde önceki portföy önbelleğini ve ilgili state'leri temizle
+                        for _k in [
+                            'portfolio_initialized',
+                            'portfolio_data',
+                            'portfolio_data_hash',
+                            'portfolio_values_cache',
+                            'active_portfolio_tab',
+                        ]:
+                            if _k in st.session_state:
+                                del st.session_state[_k]
                         
                         # TEST KULLANICISI için özel isim
                         if email == "erdalural@gmail.com":
@@ -5063,93 +5112,137 @@ def show_login_page():
         with left_col:
             new_name = st.text_input("👤 Ad Soyad:", key="register_name")
             new_email = st.text_input("📧 Email:", key="register_email")
-            
-        # E-posta doğrulama durumunu kontrol et
-        email_verified = is_email_verified(new_email) if new_email else False
-        
-        # Email girildiğinde doğrulama sürecini başlat (veya sekmeye girince butonu göster)
-        if not email_verified:
-            # Use a per-email key when email exists; otherwise no key yet
-            code_sent_key = f"code_sent_{new_email}" if new_email else None
-            code_sent = st.session_state.get(code_sent_key, False) if code_sent_key else False
 
-            # Show instruction and the Kod Gönder button immediately (even if email empty)
-            st.info("📧 E-posta adresinizi doğrulamanız gerekiyor. Kod Gönder'e basın ve e-posta adresinizi girin.")
+            # E-posta doğrulama durumunu kontrol et (session flag or external check)
+            email_verified = False
+            # First check persistent verification (function), then session-level flag
+            if new_email:
+                email_verified = is_email_verified(new_email) or st.session_state.get(f"email_verified_{new_email}", False)
 
-            col1, col2, col3 = st.columns([1, 1, 2])
-            with col1:
-                if st.button("📨 Kod Gönder", type="primary", key="send_code", use_container_width=True):
-                    if new_email:
-                        # E-posta format kontrolü
-                        if "@" in new_email and "." in new_email.split("@")[1]:
-                            verification_code = generate_verification_code()
-                            # Kodu session state'e kaydet
-                            store_verification_code(new_email, verification_code)
-                            # Email göndermeyi dene
-                            success, message = send_verification_email(new_email, verification_code)
-                            # Kod gönderildi olarak işaretle
-                            st.session_state[f"code_sent_{new_email}"] = True
-                            st.rerun()
-                        else:
-                            st.error("❌ Geçerli bir e-posta adresi girin!")
-                    else:
-                        st.error("❗ Lütfen önce e-posta adresinizi girin, sonra 'Kod Gönder' butonuna basın.")
+            # Email girildiğinde doğrulama sürecini başlat (veya sekmeye girince butonu göster)
+            if not email_verified:
+                # Show instruction and the Kod Gönder button immediately (even if email empty)
+                st.info("📧 E-posta adresinizi doğrulamanız gerekiyor. Kod Gönder'e basın ve e-posta adresinizi girin.")
 
-            # If a code was previously sent to this email, show verification input
-            if new_email and st.session_state.get(f"code_sent_{new_email}", False):
-                st.success("📧 Doğrulama kodu e-posta adresinize gönderildi!")
-                verification_input = st.text_input("🔑 E-postanıza gelen 6 haneli kodu girin:", 
-                                                 max_chars=6, key="verification_code")
-                
-                col1, col2 = st.columns([1, 1])
+                col1, col2, col3 = st.columns([1, 1, 2])
                 with col1:
-                    if st.button("✅ Doğrula", type="primary", use_container_width=True):
-                        if verification_input:
-                            success, message = verify_code(new_email, verification_input)
-                            if success:
-                                # Kod gönderildi state'ini temizle
-                                st.session_state.pop(f"code_sent_{new_email}", None)
-                                st.success(f"✅ {message}")
+                    if st.button("📨 Kod Gönder", type="primary", use_container_width=True, key="send_code"):
+                        if new_email:
+                            # E-posta format kontrolü
+                            if "@" in new_email and "." in new_email.split("@")[1]:
+                                verification_code = generate_verification_code()
+                                # Kodu session state'e kaydet
+                                store_verification_code(new_email, verification_code)
+                                # Email göndermeyi dene
+                                success, message = send_verification_email(new_email, verification_code)
+                                # Kod gönderildi olarak işaretle
+                                st.session_state[f"code_sent_{new_email}"] = True
                                 st.rerun()
                             else:
-                                st.error(f"❌ {message}")
+                                st.error("❌ Geçerli bir e-posta adresi girin!")
                         else:
-                            st.error("❌ Lütfen doğrulama kodunu girin!")
-                
-                with col2:
-                    if st.button("🔄 Yeni Kod Gönder", use_container_width=True):
-                        verification_code = generate_verification_code()
-                        store_verification_code(new_email, verification_code)
-                        success, message = send_verification_email(new_email, verification_code)
-                        st.rerun()
-        
-        elif email_verified:
-            st.success("✅ E-posta adresiniz doğrulandı!")
-        
-        # Şifre alanları (sadece e-posta doğrulandığında göster)
-        if email_verified:
-            with left_col:
-                new_password = st.text_input("🔒 Şifre:", type="password", key="register_password")
-                confirm_password = st.text_input("🔒 Şifre Tekrar:", type="password", key="confirm_password")
+                            st.error("❗ Lütfen önce e-posta adresinizi girin, sonra 'Kod Gönder' butonuna basın.")
 
-                if st.button("📝 Hesap Oluştur", type="primary", use_container_width=True):
-                    if new_name and new_email and new_password and confirm_password:
-                        if new_password == confirm_password:
-                            if len(new_password) >= 6:
-                                success, message = register_user(new_email, new_password, new_name)
+                # If a code was previously sent to this email, show verification input
+                if new_email and st.session_state.get(f"code_sent_{new_email}", False):
+                    st.success("📧 Doğrulama kodu e-posta adresinize gönderildi!")
+                    # Show a compact input for the 6-digit verification code
+                    code_cols = st.columns([0.45, 2])
+                    with code_cols[0]:
+                        verification_input = st.text_input(
+                            "🔑 E-postanıza gelen 6 haneli kodu girin:",
+                            max_chars=6,
+                            key="verification_code",
+                            placeholder="123456",
+                            help="Lütfen e-postanıza gelen 6 haneli doğrulama kodunu girin"
+                        )
+                    with code_cols[1]:
+                        st.write("")
+
+                    col1, col2 = st.columns([1, 1])
+                    with col1:
+                        if st.button("✅ Doğrula", type="primary", use_container_width=True, key="verify_code"):
+                            # Ensure a 6-digit numeric code is entered
+                            if not verification_input:
+                                st.error("❌ Lütfen doğrulama kodunu girin!")
+                            elif len(verification_input) != 6 or not verification_input.isdigit():
+                                st.error("❌ Doğrulama kodu 6 haneli sayısal olmalıdır!")
+                            else:
+                                success, message = verify_code(new_email, verification_input)
                                 if success:
+                                    # Kod gönderildi state'ini temizle and mark verified
+                                    st.session_state.pop(f"code_sent_{new_email}", None)
+                                    st.session_state[f"email_verified_{new_email}"] = True
                                     st.success(f"✅ {message}")
-                                    st.info("🎉 Artık giriş yapabilirsiniz!")
+                                    st.rerun()
                                 else:
                                     st.error(f"❌ {message}")
+
+                    with col2:
+                        if st.button("🔄 Yeni Kod Gönder", use_container_width=True, key="resend_code"):
+                            verification_code = generate_verification_code()
+                            store_verification_code(new_email, verification_code)
+                            success, message = send_verification_email(new_email, verification_code)
+                            st.rerun()
+
+            else:
+                st.success("✅ E-posta adresiniz doğrulandı!")
+
+            # Şifre alanları (sadece e-posta doğrulandığında göster)
+            if email_verified:
+                st.info("🔐 **Güçlü Şifre Oluşturun:** En az 8 karakter, 1 rakam ve 1 özel karakter (!@#$%&*) içermelidir.")
+                new_password = st.text_input("🔒 Şifre:", type="password", key="register_password")
+                confirm_password = st.text_input("🔒 Şifre Tekrar:", type="password", key="confirm_password")
+                
+                # Hata mesajları için placeholder oluştur
+                error_placeholder = st.empty()
+
+                if st.button("📝 Hesap Oluştur", type="primary", use_container_width=True, key="create_account_button"):
+                    print(f"[DEBUG] Button clicked - name={new_name}, email={new_email}, pwd_len={len(new_password) if new_password else 0}, confirm_len={len(confirm_password) if confirm_password else 0}")
+                    if new_name and new_email and new_password and confirm_password:
+                        if new_password == confirm_password:
+                            # Password policy: min 8 chars, at least one digit, at least one special char
+                            has_min_len = len(new_password) >= 8
+                            has_digit = any(ch.isdigit() for ch in new_password)
+                            has_special = any(not ch.isalnum() for ch in new_password)
+                            
+                            print(f"[DEBUG] Password checks - len={len(new_password)}, has_min_len={has_min_len}, has_digit={has_digit}, has_special={has_special}")
+
+                            if not has_min_len:
+                                with error_placeholder.container():
+                                    st.error("❌ **Şifre Çok Kısa!**")
+                                    st.info("💡 Şifreniz en az **8 karakter** uzunluğunda olmalıdır. Örnek: `Guvenli123!`")
+                            elif not has_digit:
+                                with error_placeholder.container():
+                                    st.error("❌ **Şifrede Rakam Yok!**")
+                                    st.info("💡 Şifreniz en az **bir rakam (0-9)** içermelidir. Örnek: `Guvenli123!`")
+                            elif not has_special:
+                                with error_placeholder.container():
+                                    st.error("❌ **Şifrede Özel Karakter Yok!**")
+                                    st.info("💡 Şifreniz en az **bir özel karakter** içermelidir (örn. `!@#$%&*`). Örnek: `Guvenli123!`")
                             else:
-                                st.error("❌ Şifre en az 6 karakter olmalıdır!")
+                                success, message = register_user(new_email, new_password, new_name)
+                                print(f"[REGISTER RESULT] email={new_email}, success={success}, message={message}")
+                                if success:
+                                    with error_placeholder.container():
+                                        st.success(f"✅ {message}")
+                                        st.info("🎉 Artık giriş yapabilirsiniz!")
+                                    st.balloons()
+                                    # Temizlik
+                                    st.session_state.pop(f"email_verified_{new_email}", None)
+                                    if f"code_sent_{new_email}" in st.session_state:
+                                        st.session_state.pop(f"code_sent_{new_email}")
+                                else:
+                                    with error_placeholder.container():
+                                        st.error(f"❌ {message}")
                         else:
-                            st.error("❌ Şifreler eşleşmiyor!")
+                            with error_placeholder.container():
+                                st.error("❌ Şifreler eşleşmiyor!")
                     else:
-                        st.error("❌ Lütfen tüm alanları doldurun!")
-        else:
-            st.info("💡 Hesap oluşturmak için önce e-posta adresinizi doğrulayın.")
+                        with error_placeholder.container():
+                            st.error("❌ Lütfen tüm alanları doldurun!")
+            else:
+                st.info("💡 Hesap oluşturmak için önce e-posta adresinizi doğrulayın.")
     
     elif selected_tab == "🔄 Şifre Sıfırla":
         show_password_reset_form()
@@ -5251,7 +5344,18 @@ def show_password_reset_form():
             if save_button:
                 if new_password and confirm_password:
                     if new_password == confirm_password:
-                        if len(new_password) >= 6:
+                        # Password policy for reset: min 8 chars, at least one digit, at least one special char
+                        has_min_len = len(new_password) >= 8
+                        has_digit = any(ch.isdigit() for ch in new_password)
+                        has_special = any(not ch.isalnum() for ch in new_password)
+
+                        if not has_min_len:
+                            st.error("❌ Şifre en az 8 karakter olmalıdır!")
+                        elif not has_digit:
+                            st.error("❌ Şifre en az bir rakam içermelidir!")
+                        elif not has_special:
+                            st.error("❌ Şifre en az bir özel karakter (örn. !@#%&) içermelidir!")
+                        else:
                             try:
                                 # Şifreyi güncelle
                                 users = load_users()
@@ -5276,8 +5380,6 @@ def show_password_reset_form():
                                     st.error("❌ Kullanıcı bulunamadı!")
                             except Exception as e:
                                 st.error(f"❌ Şifre güncelleme hatası: {str(e)}")
-                        else:
-                            st.error("❌ Şifre en az 6 karakter olmalıdır!")
                     else:
                         st.error("❌ Şifreler eşleşmiyor!")
                 else:
@@ -5980,9 +6082,20 @@ def show_main_app():
     
     with col3:
         if st.button("🚪 Çıkış Yap", type="secondary"):
+            # Oturum ve kullanıcı bilgilerini temizle
             for key in ['logged_in', 'user_email', 'user_name']:
                 if key in st.session_state:
                     del st.session_state[key]
+            # Kullanıcıya özel cache/state alanlarını da temizle
+            for _k in [
+                'portfolio_initialized',
+                'portfolio_data',
+                'portfolio_data_hash',
+                'portfolio_values_cache',
+                'active_portfolio_tab',
+            ]:
+                if _k in st.session_state:
+                    del st.session_state[_k]
             st.rerun()
     
     st.markdown("---")
